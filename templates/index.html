@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Advisor Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+
+<body class="bg-gray-100 p-6">
+    <div class="container mx-auto">
+        <h1 class="text-3xl font-bold mb-6">Weather Advisor Chat</h1>
+
+        <div class="mb-4">
+            <label for="voice-select" class="block text-sm font-medium text-gray-700">Select Voice:</label>
+            <select id="voice-select"
+                class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md">
+                <option value="" disabled selected>Select a Voice</option>
+            </select>
+        </div>
+
+        <div id="chat-window">
+            <div id="chat-box" class="border border-gray-300 p-4 rounded-md mb-4 h-96 overflow-y-auto bg-white"></div>
+            <div class="flex items-center">
+                <textarea type="text" id="message-input"
+                    class="flex-grow border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm mr-2 p-2"
+                    placeholder="Type your message"></textarea>
+                <button id="mic-button" class="px-4 py-2 bg-indigo-600 text-white rounded-md shadow-sm">🎤</button>
+                <button id="send-button"
+                    class="ml-2 px-4 py-2 bg-green-600 text-white rounded-md shadow-sm">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const chatWindow = document.getElementById('chat-window');
+        const chatBox = document.getElementById('chat-box');
+        const messageInput = document.getElementById('message-input');
+        const micButton = document.getElementById('mic-button');
+        const sendButton = document.getElementById('send-button');
+
+        let isRecording = false;
+        let recognition;
+        let finalTranscript = '';
+
+        micButton.addEventListener('click', () => {
+            if (!isRecording) {
+                startRecognition();
+            } else {
+                stopRecognition();
+            }
+        });
+
+        sendButton.addEventListener('click', async () => {
+            const message = messageInput.value.trim();
+            if (message) {
+                appendMessage('🗣️', message);
+                await sendMessage(message);
+                messageInput.value = '';
+                messageInput.focus();
+            }
+        });
+
+        function getJson(s) {
+            s = s.slice(s.search(/[\[{]/));
+            try {
+                return JSON.parse(s);
+            } catch (e) {
+                return JSON.parse(s.slice(0, e.message.match(/position (\d+)/)[1]));
+            }
+        }
+
+
+        function startRecognition() {
+            isRecording = true;
+            micButton.textContent = 'Stop 🎤';
+
+            recognition = new webkitSpeechRecognition();
+            recognition.interimResults = true;
+            recognition.continuous = true;
+
+            recognition.onresult = (event) => {
+                let interimTranscript = '';
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript;
+                    } else {
+                        interimTranscript += event.results[i][0].transcript;
+                    }
+                }
+                messageInput.value = finalTranscript + interimTranscript;
+            };
+
+            recognition.start();
+        }
+
+        function stopRecognition() {
+            isRecording = false;
+            micButton.textContent = '🎤';
+            recognition.stop();
+            appendMessage('🗣️', finalTranscript);
+            sendMessage(finalTranscript);
+            finalTranscript = '';
+        }
+
+        function uuidv4() {
+            return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
+                (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
+            );
+        }
+        const chatId = uuidv4();
+        async function sendMessage(message) {
+            try {
+                const response = await fetch(`/chat/${chatId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        "user_query": message,
+                    })
+                })
+
+                if (!response.body) {
+                    throw new Error('ReadableStream not supported');
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let done = false;
+                const newMessage = appendMessage('🤖', '');
+                const m = newMessage.querySelector('.msg');
+                let msgContents = ''
+                while (!done) {
+                    const { value, done: streamDone } = await reader.read();
+                    done = streamDone;
+                    const data = decoder.decode(value, { stream: true });
+                    const chunks = data.split('\n');
+                    for (chunk in chunks) {
+                        try {
+                            let message = getJson(chunks[chunk]);
+                            message = message?.text?.value;
+                            console.log("Parsed Message", message);
+                            msgContents += message;
+                            m.innerHTML = marked.parse(msgContents);
+                        } catch (error) { }
+                    }
+                }
+                speakText(msgContents);
+            } catch (error) {
+                console.error('Error sending message:', error);
+            }
+        }
+
+        function appendMessage(sender, message) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('mb-2');
+            messageElement.innerHTML = `<strong>${sender}:</strong>\n<span class="msg">${message}</span>`;
+            chatBox.appendChild(messageElement);
+            chatBox.scrollTop = chatBox.scrollHeight;
+            // get the messageElement from chatBox
+            const newMessage = chatBox.children[chatBox.children.length - 1];
+            return newMessage;
+        }
+
+        const synth = window.speechSynthesis;
+        const voiceSelect = document.querySelector("#voice-select");
+
+        let voices;
+
+        function loadVoices() {
+            voices = synth.getVoices();
+            for (let i = 0; i < voices.length; i++) {
+                const option = document.createElement("option");
+                if (voices[i].lang === "en-US") {
+                    option.textContent = `${voices[i].name} (${voices[i].lang})`;
+                    option.value = i;
+                    voiceSelect.appendChild(option);
+                }
+            }
+        }
+
+        if ("onvoiceschanged" in synth) {
+            synth.onvoiceschanged = loadVoices;
+        } else {
+            loadVoices();
+        }
+
+        function speakText(text) {
+            const utterance = new SpeechSynthesisUtterance(text.replace(/[.,\/#!$%\^&\*;*:{}=\-_`~()]/g, ""));
+            utterance.voice = voices[voiceSelect.value];
+            utterance.rate = 1.1;
+            utterance.pitch = 1.1;
+            window.speechSynthesis.speak(utterance);
+        }
+    </script>
+</body>
+
+</html>
