@@ -3,7 +3,7 @@
 This project showcases how you can use asynchronous streaming with OpenAI assistant and at the same time utilize function calling
 in FastAPI.
 
-You can read about it in detail in the following blog post: [OpenAI Assistant Streaming with Function Calling in FastAPI](https://medium.com/@muhammadmeeran2003/async-streaming-openai-assistant-api-with-function-calling-in-fastapi-0dfe5935f238)
+You can read about it in detail in the following blog post: [OpenAI Assistant Streaming with Function Calling in FastAPI](https://medium.com/@meeran2003/async-streaming-openai-assistant-api-with-function-calling-in-fastapi-0dfe5935f238)
 
 ![OpenAI Assistant Streaming with Function Calling in FastAPI](./demo.png?raw=true "Demo")
 
