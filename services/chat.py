@@ -42,7 +42,7 @@ class ChatService(metaclass=Singleton):
 
     def __init__(self) -> None:
         self.client = OpenAI()
-        self.name = 'News Summarizer'
+        self.name = 'Activity Suggester'
         self.assistant_id = config.ASSISTANT_ID
         self.init_tools()
         self.initialize()

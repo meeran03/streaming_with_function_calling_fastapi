@@ -58,8 +58,8 @@
             const message = messageInput.value.trim();
             if (message) {
                 appendMessage('🗣️', message);
-                await sendMessage(message);
                 messageInput.value = '';
+                await sendMessage(message);
                 messageInput.focus();
             }
         });
@@ -103,6 +103,7 @@
             recognition.stop();
             appendMessage('🗣️', finalTranscript);
             sendMessage(finalTranscript);
+            messageInput.value = '';
             finalTranscript = '';
         }
 

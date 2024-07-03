@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api.router import api_router
 
-app = FastAPI(title="News Summarizer App", version="1.0", debug=True)
+app = FastAPI(title="Activities Suggester App", version="1.0", debug=True)
 
 app.add_middleware(
     CORSMiddleware,
