@@ -1,5 +1,5 @@
 """
-    This file will house all the prompts used in the application.
+This file will house all the prompts used in the application.
 """
 
 SYS_PROMPT = """

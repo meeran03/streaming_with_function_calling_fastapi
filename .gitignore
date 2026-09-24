@@ -9,3 +9,5 @@ env
 
 .vscode
 !.vscode/launch.json
+
+.venv/

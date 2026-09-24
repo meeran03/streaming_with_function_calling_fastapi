@@ -1,216 +1,173 @@
-"""
-    This file contains the core functionality of the chat service.
-"""
+"""Responses API tool loop with bounded sessions and explicit stream outcomes."""
 
-import os
+from __future__ import annotations
 import asyncio
 import json
-
-from openai import AsyncOpenAI as OpenAI
-from openai.types.beta import Assistant, Thread
-from openai.types.beta.assistant_stream_event import (
-    ThreadRunRequiresAction,
-    ThreadMessageDelta,
-    ThreadRunFailed,
-    ThreadRunCancelling,
-    ThreadRunCancelled,
-    ThreadRunExpired,
-    ThreadRunStepFailed,
-    ThreadRunStepCancelled,
-)
-
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any
+from openai import AsyncOpenAI
 from config.main import config
-from config.prompts import SYS_PROMPT
-from utils.singleton import Singleton
-from services.assistant_setup import AssistantSetup
 from tools.definitions import GET_WEATHER_INFORMATION
 from tools.get_weather import get_weather_information
+from services.demo import DemoClient
 
-os.environ["OPENAI_API_KEY"] = config.OPENAI_API_KEY
+INSTRUCTIONS = "Help with activity suggestions. Weather results in this demo are fictional fixtures: say so clearly. Use the weather tool when useful, and never claim it is a live forecast."
 
-class ChatService(metaclass=Singleton):
-    """
-    This class is used to handle the OpenAI GPT based assistant.
-    """
 
-    assistant: Assistant = None
-    assistant_setup: AssistantSetup = None
-    sys_prompt: str = SYS_PROMPT
-    chat_to_thread_map = {}
-    tools = []
-    tool_instances = {}
+@dataclass
+class Conversation:
+    turns: deque = field(default_factory=lambda: deque(maxlen=8))
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    touched: float = field(default_factory=time.monotonic)
 
-    def __init__(self) -> None:
-        self.client = OpenAI()
-        self.name = 'Activity Suggester'
-        self.assistant_id = config.ASSISTANT_ID
-        self.init_tools()
-        self.initialize()
 
-    def initialize(self):
-        """
-        This function initializes the required services and objects.
-        """
-        self.assistant_setup = AssistantSetup(
-            self.client,
-            self.assistant_id,
-            self.sys_prompt,
-            self.name,
-            self.tools,
+class ChatService:
+    def __init__(
+        self, client=None, model=None, max_sessions=64, timeout=45, max_rounds=4
+    ):
+        if max_sessions < 1 or timeout <= 0 or max_rounds < 1:
+            raise ValueError("limits must be positive")
+        self.client = client
+        self.model = model or config.OPENAI_MODEL
+        self.max_sessions, self.timeout, self.max_rounds = (
+            max_sessions,
+            timeout,
+            max_rounds,
         )
+        self.sessions: dict[str, Conversation] = {}
 
-    async def create_assistant(self):
-        """
-        This function creates assistant if not exists
-        """
-        if not self.assistant:
-            self.assistant = (  # pylint: disable=attribute-defined-outside-init
-                await self.assistant_setup.create_or_update_assistant()
-            )
-
-    async def generate(self, chat_id, content):
-        """
-        It generates the response for the user query.
-        """
-        await self.create_assistant()
-        thread = await self.create_or_get_thread(chat_id)
-        await self.client.beta.threads.messages.create(
-            thread.id,
-            role="user",
-            content=content,
-        )
-        stream = await self.client.beta.threads.runs.create(
-            thread_id=thread.id, assistant_id=self.assistant.id, stream=True
-        )
-        async for event in stream:
-            async for token in self.process_event(event, thread):
-                yield token
-
-        print("Tool run completed")
-
-    async def create_or_get_thread(self, chat_id) -> Thread:
-        """
-        This function either creates a new thread for the chat_id or gets the existing thread.
-        """
-        thread = None
-        if self.chat_to_thread_map.get(chat_id):
-            try:
-                thread = await self.client.beta.threads.retrieve(self.chat_to_thread_map[chat_id])
-            except Exception as e:  # pylint: disable=bare-except, broad-except
-                print("Error in getting thread", e)
-                thread = None
-        if not thread:
-            thread = await self.client.beta.threads.create(
-                metadata={
-                    "chat_id": str(chat_id),
-                },
-            )
-            self.chat_to_thread_map[chat_id] = thread.id
-        return thread
-
-    def create_tool_output(self, tool_call, tool_result):
-        """
-        This function creates the tool output.
-        """
-        output = {
-            "tool_call_id": tool_call.id,
-            "output": tool_result,
-        }
-        return output
-
-    async def process_event(self, event, thread: Thread, **kwargs):
-        """
-        Process an event in the thread.
-
-        Args:
-            event: The event to be processed.
-            thread: The thread object.
-            **kwargs: Additional keyword arguments.
-
-        Yields:
-            The processed tokens.
-
-        Raises:
-            Exception: If the run fails.
-        """
-        if isinstance(event, ThreadMessageDelta):
-            data = event.data.delta.content
-            for d in data:
-                yield d
-
-        elif isinstance(event, ThreadRunRequiresAction):
-            run_obj = event.data
-            tool_outputs = await self.process_tool_calls(
-                run_obj.required_action.submit_tool_outputs.tool_calls
-            )
-            tool_output_events = (
-                await self.client.beta.threads.runs.submit_tool_outputs(
-                    thread_id=thread.id,
-                    run_id=run_obj.id,
-                    tool_outputs=tool_outputs,
-                    stream=True,
+    def get_client(self):
+        if self.client is None:
+            self.client = (
+                DemoClient()
+                if config.DEMO_MODE
+                else AsyncOpenAI(
+                    api_key=config.OPENAI_API_KEY, timeout=30, max_retries=0
                 )
             )
-            async for tool_event in tool_output_events:
-                async for token in self.process_event(
-                    tool_event, thread=thread, **kwargs
-                ):
-                    yield token
+        return self.client
 
-        elif any(
-            isinstance(event, cls)
-            for cls in [
-                ThreadRunFailed,
-                ThreadRunCancelling,
-                ThreadRunCancelled,
-                ThreadRunExpired,
-                ThreadRunStepFailed,
-                ThreadRunStepCancelled,
-            ]
-        ):
-            raise Exception("Run failed") # pylint: disable=broad-exception-raised
+    def conversation(self, chat_id):
+        now = time.monotonic()
+        for key, session in list(self.sessions.items()):
+            if not session.lock.locked() and now - session.touched > 3600:
+                del self.sessions[key]
+        if chat_id not in self.sessions:
+            if len(self.sessions) >= self.max_sessions:
+                raise RuntimeError("session capacity reached")
+            self.sessions[chat_id] = Conversation()
+        return self.sessions[chat_id]
 
-    def init_tools(self):
-        """
-        This function initializes the tools.
-        """
-        self.tools = [GET_WEATHER_INFORMATION]
-        self.tool_instances = {
-            "get_weather_information": get_weather_information,
-        }
-
-    async def process_tool_call(self, tool_call, tool_outputs: list, extra_args=None):
-        """
-        This function processes a single tool call.
-        And also handles the exceptions.
-        """
-        result = None
+    async def execute(self, call, cache):
+        signature = (call.name, call.arguments)
+        if call.call_id in cache:
+            previous, output = cache[call.call_id]
+            if previous != signature:
+                raise RuntimeError("conflicting duplicate tool call")
+            return output
         try:
-            arguments = json.loads(tool_call.function.arguments)
-            function_name = tool_call.function.name
-            if extra_args:
-                for key, value in extra_args.items():
-                    arguments[key] = value
-            if function_name not in self.tool_instances:
-                result = "Tool not found"
-            else:
-                result = await self.tool_instances[function_name](**arguments)
-        except Exception as e:  # pylint: disable=broad-except
-            result = str(e)
-            print(e)
-        created_tool_output = self.create_tool_output(tool_call, result)
-        tool_outputs.append(created_tool_output)
+            if call.name != "get_weather_information":
+                raise ValueError("unknown tool")
+            args = json.loads(call.arguments)
+            if not isinstance(args, dict) or set(args) != {"latitude", "longitude"}:
+                raise ValueError("invalid arguments")
+            output = json.dumps(
+                await asyncio.wait_for(get_weather_information(**args), timeout=5)
+            )
+        except (ValueError, TypeError):
+            output = json.dumps(
+                {
+                    "error": "Invalid tool or coordinates. Supply latitude and longitude as finite numbers."
+                }
+            )
+        cache[call.call_id] = (signature, output)
+        return output
 
-    async def process_tool_calls(self, tool_calls, extra_args = None):
-        """
-        This function processes all the tool calls.
-        """
-        tool_outputs = []
-        coroutines = []
-        total_calls = len(tool_calls)
-        for i in range(total_calls):
-            tool_call = tool_calls[i]
-            coroutines.append(self.process_tool_call(tool_call, tool_outputs, extra_args))
-        if coroutines:
-            await asyncio.gather(*coroutines)
-        return tool_outputs
+    async def generate(self, chat_id, content):
+        try:
+            conversation = self.conversation(chat_id)
+            if conversation.lock.locked():
+                yield {
+                    "event": "error",
+                    "message": "This conversation already has a response in progress.",
+                }
+                return
+            async with conversation.lock:
+                conversation.touched = time.monotonic()
+                previous = [item for turn in conversation.turns for item in turn]
+                turn: list[dict[str, Any]] = [{"role": "user", "content": content}]
+                cache = {}
+                async with asyncio.timeout(self.timeout):
+                    for _ in range(self.max_rounds):
+                        completed = None
+                        stream = await self.get_client().responses.create(
+                            model=self.model,
+                            instructions=INSTRUCTIONS,
+                            input=previous + turn,
+                            tools=[GET_WEATHER_INFORMATION],
+                            stream=True,
+                            store=False,
+                            include=["reasoning.encrypted_content"],
+                            max_output_tokens=1000,
+                        )
+                        try:
+                            async for event in stream:
+                                if event.type == "response.output_text.delta":
+                                    yield {"event": "delta", "text": event.delta}
+                                elif event.type == "response.completed":
+                                    completed = event.response
+                                elif event.type in {
+                                    "response.failed",
+                                    "response.incomplete",
+                                    "error",
+                                }:
+                                    raise RuntimeError(
+                                        "upstream response did not complete"
+                                    )
+                        finally:
+                            await stream.close()
+                        if completed is None or completed.status != "completed":
+                            raise RuntimeError(
+                                "stream ended without a completed response"
+                            )
+                        turn.extend(
+                            item.model_dump(mode="json", exclude_none=True)
+                            for item in completed.output
+                        )
+                        calls = [
+                            item
+                            for item in completed.output
+                            if item.type == "function_call"
+                        ]
+                        if not calls:
+                            conversation.turns.append(turn)
+                            conversation.touched = time.monotonic()
+                            yield {"event": "done"}
+                            return
+                        if len(calls) > 8:
+                            raise RuntimeError("too many tool calls")
+                        for call in calls:
+                            output = await self.execute(call, cache)
+                            turn.append(
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": call.call_id,
+                                    "output": output,
+                                }
+                            )
+                            yield {"event": "tool", "name": call.name}
+                    raise RuntimeError("tool round limit exceeded")
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            yield {
+                "event": "error",
+                "message": "Response deadline exceeded. Any text already displayed is incomplete.",
+            }
+        except Exception:
+            yield {
+                "event": "error",
+                "message": "Response failed. Any text already displayed is incomplete. Check configuration or retry.",
+            }

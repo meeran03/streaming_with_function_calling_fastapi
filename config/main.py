@@ -1,26 +1,13 @@
-"""
-    This file contains all project configs read from env file.
-"""
-
 import os
+from dotenv import load_dotenv
 
-class Base(object):
-    """
-    Base configuration class. Contains all the default configurations.
-    """
+load_dotenv()
 
-    DEBUG: bool = True
 
-class Config(Base):
-    """
-    Main configuration class. Contains all the configurations for the project.
-    """
-
-    DEBUG: bool = True
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY")
-    ASSISTANT_ID: str = os.getenv("ASSISTANT_ID")
-    OPENAI_MODEL: str = "gpt-4o"
-    OPENWEATHER_API_KEY: str = os.getenv("OPENWEATHER_API_KEY")
+class Config:
+    DEMO_MODE = os.getenv("DEMO_MODE", "1") == "1"
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 
 config = Config()

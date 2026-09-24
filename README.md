@@ -1,84 +1,66 @@
-# OpenAI Assistant Streaming with Function Calling in FastAPI
+# Streaming tool calls with FastAPI
 
-This project showcases how you can use asynchronous streaming with OpenAI assistant and at the same time utilize function calling
-in FastAPI.
+A small, inspectable example of the **OpenAI Responses API → validated tool execution → streamed browser response** loop. Includes a deterministic local mode, so you can run the complete flow without an account, API key, or paid request.
 
-You can read about it in detail in the following blog post: [OpenAI Assistant Streaming with Function Calling in FastAPI](https://medium.com/@meeran2003/async-streaming-openai-assistant-api-with-function-calling-in-fastapi-0dfe5935f238)
+Originally published in 2024; refreshed in September 2026. The [original article](https://medium.com/@meeran2003/async-streaming-openai-assistant-api-with-function-calling-in-fastapi-0dfe5935f238) describes the earlier Assistants API implementation. The current code uses Responses.
 
-![OpenAI Assistant Streaming with Function Calling in FastAPI](./demo.png?raw=true "Demo")
+## Run in five minutes
 
-## Description
+Requires Python **3.13+**. From the repository root:
 
-This project demonstrates how you can use FastAPI to create a real-time chat interface that communicates with OpenAI's GPT models for automated responses. The application also supports function calling, allowing you to execute commands and retrieve information in real-time.
-
-## Features
-
-- Asynchronous streaming for real-time chat communication.
-- Function calling for executing commands and retrieving information.
-- Integration with OpenAI's GPT models for automated responses.
-- Weather information retrieval using the OpenWeather API.
-- Text to Speech and Speech to Text using web APIs.
-- Chat interface for real-time communication.
-
-## Getting Started
-
-### Dependencies
-
-- Python 3.8 or higher
-- FastAPI
-- OpenAI API
-- aiohttp, httpx for asynchronous HTTP requests
-
-Refer to `requirements.txt` for a complete list of dependencies.
-
-### Installing
-
-1. Clone the repository to your local machine.
-2. Create a virtual environment:
-
-```sh
-python -m venv env
-```
-
-3. Activate the virtual environment:
-
-- On Windows:
-
-```sh
-env\Scripts\activate
-```
-
-- On Unix or MacOS:
-
-```sh
-source env/bin/activate
-```
-
-4. Install the required packages:
-
-```sh
+```bash
+git clone https://github.com/meeran03/streaming_with_function_calling_fastapi.git
+cd streaming_with_function_calling_fastapi
+python3.13 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env
+uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-### Configuration
+Open **http://127.0.0.1:8000**, send a message, and watch the tool event and incremental text. `DEMO_MODE=1` is the default. The local provider intentionally follows a fixed weather-tool scenario; it is not a language model. The weather tool returns a **fictional fixture**, including in live model mode.
 
-- Copy `.env.development` to `.env` and adjust the configuration variables as needed.
-- Ensure you have valid API keys for OpenAI and OpenWeather APIs set in your `.env` file.
+## What to inspect
 
-### Running the Application
-
-1. Start the application:
-
-```sh
-uvicorn main:app --reload
+```text
+Browser POST /chat/{chat_id}
+  → bounded, per-conversation session
+  → Responses stream
+  → completed function-call arguments validated
+  → local tool result returned to model
+  → JSON server-sent events: delta / tool / done / error
 ```
 
-2. Visit `http://127.0.0.1:8000` in your web browser to access the chat interface.
+- [Tool loop](services/chat.py): four-round limit, 45-second response deadline, at most eight tool calls per round, and duplicate-call conflict detection.
+- [Session handling](services/chat.py): at most 64 in-memory conversations, one active response per conversation, eight complete turns of history, and one-hour idle expiry.
+- [SSE encoding](utils/stream.py) and [browser reader](templates/index.html): JSON framing, incremental UTF-8 decoding, cancellation, and explicit incomplete-response errors.
+- [Tool validation](tools/get_weather.py): finite coordinates and latitude/longitude bounds. No arbitrary function dispatch.
+- [Tests](tests/test_chat.py): successful tool round trips, premature stream termination, cancellation, deadlines, concurrency, bounds, and the HTTP interface.
 
-## Usage
+Only completed turns enter conversation history. On a failed stream, text already shown in the browser is explicitly marked incomplete. This is a useful boundary when integrating a model with a streaming UI.
 
-- Use the chat interface to communicate in real-time.
+## Optional live model mode
 
-## Contributing
+Set these values in your untracked `.env`:
 
-Contributions are welcome! Please feel free to submit pull requests or open issues to suggest improvements or add new features.
+```dotenv
+DEMO_MODE=0
+OPENAI_API_KEY=your-key
+OPENAI_MODEL=gpt-4o
+```
+
+Restart the server. You can choose another compatible Responses model available to your account. Live requests use your provider account and may incur charges. `store=False` disables Responses application-state storage; it is not a claim of zero provider retention. See [OpenAI's function-calling guide](https://developers.openai.com/api/docs/guides/function-calling).
+
+The automated suite uses a deterministic provider. It does **not** prove live model quality or provider availability.
+
+## Validate
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Boundaries
+
+This is a local teaching example, not a hosted multi-tenant service. Conversation IDs are not authentication. State and duplicate-call tracking are process-local and disappear on restart. Before exposing it, add authentication, tenant isolation, request limits, durable storage, provider observability, and a policy for sensitive tool output. The fixture has no external side effect; production side-effecting tools need durable idempotency and reconciliation.
+
+Built by [Muhammad Meeran](https://meeran.dev). For session lifecycle failure scenarios, see [Voice Session Lab](https://github.com/meeran03/voice-session-lab).
